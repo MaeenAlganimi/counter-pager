@@ -1,0 +1,1 @@
+{"name":"qudra-apple-wallet-signer","private":true,"type":"module","scripts":{"generate":"node generate.mjs"},"dependencies":{"passkit-generator":"^3.4.0"}}

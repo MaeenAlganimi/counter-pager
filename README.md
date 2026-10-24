@@ -1,84 +1,88 @@
 # Qudra Pager
 
-A tablet-friendly café pager built with Vite, React, TypeScript, React Router, Supabase, and qrcode.react. English and Arabic interfaces include full RTL layout and remember the selected language.
+A café counter and customer pager built with Vite, React, TypeScript and Supabase. The original blue/apricot ticket design now includes item entry, pickup estimates, staff PIN sessions and server Web Push.
 
-## Setup
+## Run and deploy
 
-1. Install Node.js 22 or newer and run `npm install`.
-2. Copy `.env.example` to `.env.local` and set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. Use the public anon key, never a service-role key. These variables are embedded in the client bundle.
-3. Ensure the schema below exists and create a business with slug `demo-cafe`.
-4. Run `npm run dev`. Open the URL printed by Vite.
-5. Run `npm run build` for production and `npm run preview` to preview it. Deploy `dist` to Vercel; `vercel.json` handles SPA routes.
-
-HTTPS (or localhost) is required for service workers, notifications, and wake locks. Phones must be able to reach the application's public URL; a QR containing localhost cannot be opened from another device.
-
-## Features
-
-- `/`: product introduction and the three-step workflow.
-- `/b/:slug/staff`: create a ticket with an optional note, share its QR/link, call or re-call, mark picked up, or cancel. Waiting and Ready include outstanding tickets from previous days; Done today uses the completion date.
-- Daily completed count, average and longest creation-to-call time, and average rating for today's completed tickets. Re-calls update `called_at`, so these statistics use the latest call time.
-- Branding settings for names, logo, colours, and Google review URL.
-- `/t/:ticketId`: live customer ticket with realtime updates and a 10-second polling fallback. Staff also polls every 10 seconds if realtime disconnects.
-- Enable alerts unlocks Web Audio, requests notification permission, and requests a screen wake lock when supported. Ready calls and re-calls trigger a repeating three-note chime, vibration, a service worker notification, page flash, and title change. Stop silences the alert; another re-call starts it again. Done or cancelled also stops it.
-- Completed tickets accept 1–5 stars. Ratings of 4–5 show the configured Google review link. Ratings of 1–3 show a private feedback form; feedback never appears on the customer or staff queue cards.
-- Minimal installable manifest and service worker with notification-click focus behavior. It does not cache customer data or provide offline mode.
-
-## SQL schema
-
-The supplied project already has these tables. This is a reference for a new project; do not re-run against existing tables without adapting it.
-
-```sql
-create extension if not exists pgcrypto;
-
-create table public.pager_businesses (
-  id uuid primary key default gen_random_uuid(),
-  slug text not null unique,
-  name text not null,
-  name_ar text,
-  logo_url text,
-  primary_color text default '#193cba',
-  accent_color text default '#ffad66',
-  google_review_url text
-);
-
-create table public.pager_tickets (
-  id uuid primary key default gen_random_uuid(),
-  business_id uuid not null references public.pager_businesses(id),
-  number integer not null,
-  note text,
-  status text not null default 'waiting'
-    check (status in ('waiting', 'ready', 'done', 'cancelled')),
-  created_at timestamptz not null default now(),
-  called_at timestamptz,
-  completed_at timestamptz,
-  rating integer check (rating between 1 and 5),
-  feedback text
-);
-create index on public.pager_tickets (business_id, created_at desc);
-
-alter table public.pager_businesses enable row level security;
-alter table public.pager_tickets enable row level security;
-
--- Demo only: these policies allow anyone with the public key to read
--- and modify every business and ticket. They do not provide privacy.
-grant select, insert, update on public.pager_businesses to anon;
-grant select, insert, update on public.pager_tickets to anon;
-create policy demo_business_select on public.pager_businesses for select to anon using (true);
-create policy demo_business_insert on public.pager_businesses for insert to anon with check (true);
-create policy demo_business_update on public.pager_businesses for update to anon using (true) with check (true);
-create policy demo_ticket_select on public.pager_tickets for select to anon using (true);
-create policy demo_ticket_insert on public.pager_tickets for insert to anon with check (true);
-create policy demo_ticket_update on public.pager_tickets for update to anon using (true) with check (true);
-alter publication supabase_realtime add table public.pager_tickets;
-
-insert into public.pager_businesses (slug, name, name_ar)
-values ('demo-cafe', 'The daily café', 'المقهى اليومي');
+```sh
+npm install
+cp .env.example .env.local
+npm run dev
+npm run build
 ```
 
-## Limitations
+Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in `.env.local`. This file is ignored by Git. Only the public anon key belongs in the frontend. Never put service-role keys, VAPID private keys, or signing credentials in Vite variables.
 
-- No server Web Push yet. Notifications originate from the open customer page; a service worker alone cannot receive new ticket events when the page is suspended or closed.
-- Mobile browsers, especially iOS, may suspend timers, realtime, audio, and vibration when backgrounded or locked. iOS notifications require a supported version, installation with Add to Home Screen, and permission. Keep the ticket open and screen awake for the best results. Wake lock is best effort and reacquired when the page becomes visible.
-- Demo RLS is open, and there is no staff login. UUID links are convenient identifiers, not access control. Feedback is private in the interface only; with demo policies it is accessible via the public API. Before production add staff authentication, business-scoped authorization, restricted customer access, and protected feedback storage.
-- Ticket numbers use the maximum number since local midnight plus one. Concurrent devices can allocate the same number. Use a database transaction/RPC and a daily business counter for atomic numbering in production. Dates and statistics follow the staff device's timezone.
-- External fonts need connectivity; system sans-serif fallbacks are provided. Branding URLs must use HTTP(S), and brand colours must be six-digit hex values.
+The migration assumes the existing `pager_businesses` and `pager_tickets` tables from v1 exist. Apply `supabase/migrations/002_v2.sql` using the Supabase SQL editor or `supabase db push` against the linked project. Back up existing data first. It preserves tickets, removes old open ticket policies, revokes browser table access, removes tickets from the database realtime publication, and installs atomic per-business daily numbering. The existing public business read policy remains, limited to branding columns. The demo business's unset PIN becomes 1234; other businesses must receive a hash explicitly.
+
+```sh
+supabase functions deploy pager-api
+```
+
+`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided automatically to the function. The API uses the public anon JWT in both `apikey` and `Authorization: Bearer …` headers. If your project uses a newer non-JWT publishable key instead, use the legacy anon JWT for this app's configured gateway authentication.
+
+Deploy `dist` to an HTTPS SPA host. `vercel.json` contains route fallback configuration. QR links must point to a public URL reachable by the customer's phone.
+
+## Architecture
+
+The browser never queries or mutates tables. Every data request posts JSON `{action, ...}` to `${VITE_SUPABASE_URL}/functions/v1/pager-api`. The self-contained Deno function uses service-role access and explicit authorization:
+
+- `business`: public branding and VAPID public key; no PIN hashes or secrets.
+- `staff_login`: validates SHA-256 of `slug + ':' + pin`; issues an HMAC-SHA256 token expiring in 12 hours. The browser keeps it in sessionStorage and sends it as the JSON `token` field.
+- Staff `list`, `create`, `update_eta`, `set_status`, `branding`, `push_test` scope all operations to the signed business. `push_test` takes a ticket ID.
+- Customer `ticket`, `subscribe`, `rate`, `google_wallet`, `apple_wallet` require the ticket's secret UUID. Treat QR links as bearer credentials. Customer responses omit private feedback.
+- Tickets use UTC service days. Lists/statistics include orders created today; average/longest wait measure creation to most recent call. On-time percentage compares that call with the current ETA.
+- REST realtime broadcasts on `ticket-<uuid>` and `biz-<business_id>` contain only empty invalidation payloads. Clients subscribe with supabase-js then refetch via the function; five-second polling is the fallback. No database change stream is exposed.
+- ETA changes, calls, recalls and completion send Web Push. Creation only broadcasts to staff. Expired 404/410 subscriptions are removed. No customer data is cached by the service worker.
+
+For production, configure API gateway rate limiting for PIN login, rotate staff PINs regularly, and restrict operational access to the secrets table. SHA-256 PIN storage follows the specified schema; a short PIN still requires online brute-force protection. The SQL trigger serializes daily numbering across cashier devices.
+
+## Server secrets
+
+Insert values through the SQL editor or another privileged server connection. `pager_secrets` and `pager_push_subs` have RLS and no browser policies. Keep their contents out of source control.
+
+```sql
+insert into public.pager_secrets(key,value) values
+ ('token_secret', encode(gen_random_bytes(32),'hex')),
+ ('vapid_public', '<public base64url key>'),
+ ('vapid_private', '<private base64url key>'),
+ ('vapid_subject', 'mailto:operations@example.com'),
+ ('public_app_url', 'https://your-app.example')
+on conflict (key) do update set value=excluded.value;
+
+-- Set an individual business PIN; replace both values.
+update public.pager_businesses
+set staff_pin_hash=encode(digest(slug || ':' || '987654','sha256'),'hex')
+where slug='your-cafe';
+```
+
+Generate a VAPID pair with `npx web-push generate-vapid-keys`. Configure all three VAPID values to enable server pushes. The function supports standard Google, Mozilla, Apple and Windows push endpoints.
+
+## Product flow
+
+- `/`: introduction and demo instructions.
+- `/b/demo-cafe/staff`: PIN 1234, demo café menu tiles, quantities, custom items/total, note and ETA. Creating an order shows a large QR. The live queue provides ETA adjustments, ready/re-call, pickup, cancel and test alert controls. Branding settings include name, logo, colours and review URL.
+- `/b/:slug/staff`: the same counter for other businesses, without demo menu or PIN hint.
+- `/t/:ticketId`: branded order, items/total, countdown and ETA change notice, timestamp timeline, install and lock-screen alert controls, and completion rating. Four/five stars offer the configured Google review link; lower ratings offer private feedback.
+
+English/Arabic language selection and RTL remain available; newly added counter controls currently use English. Branding colours and currency are business-specific.
+
+## Mobile notifications
+
+HTTPS or localhost is required. Tap **Turn on lock-screen alerts** to grant permission, register the service worker and store a Web Push subscription. Android browsers supporting Web Push can receive notifications while the page is closed; an install button appears when the browser supplies an install prompt. iPhone/iPad require iOS/iPadOS 16.4 or later and installation using Share → Add to Home Screen, then permission from the installed app. See [WebKit's Web Push guidance](https://webkit.org/blog/13878/).
+
+The open page also chimes, vibrates and flashes on ready/re-call after the user enables alerts. Wake Lock is best effort and reacquired on return. Browser settings, power saving and device support can affect delivery, audio and vibration. The manifest starts at `/`; retain or reopen the private order URL after installing from an iPhone's browser.
+
+## Wallet
+
+Buttons stay hidden while the API reports unavailable.
+
+Google Wallet: add `google_wallet_issuer_id` and `google_wallet_service_account_json` (the complete Google service account JSON) to `pager_secrets`, plus `public_app_url`. Enable Google Wallet API, authorize the service account for the issuer, and complete issuer onboarding. The JWT includes the Generic class `<issuer_id>.qudra_orders` and the order object, creating them on save. The function constructs a Generic object with order/status/ETA and QR, signs an RS256 `savetowallet` JWT with Web Crypto, and returns the save URL. See [Google's web issuance guide](https://developers.google.com/wallet/generic/web). This is a snapshot; subsequent ticket updates are visible via the QR, not automatically synchronized into Wallet.
+
+Apple Wallet: signing is scaffolded in [wallet/apple](wallet/apple/README.md). It needs a Pass Type ID, team ID, signer certificate/private key and WWDR intermediate certificate plus a trusted Node signing service. Until that service is deployed and connected, `apple_wallet` returns `available:false` and the UI hides its button.
+
+## Verification
+
+`npm run build` checks the frontend TypeScript and emits the production bundle. The Edge Function is separate Deno code and must also be checked with `deno check --no-lock --node-modules-dir=auto supabase/functions/pager-api/index.ts`. Before launch, verify PIN rejection/session expiry, cross-business authorization, two concurrent order creations, QR tracking, ETA and ready push on physical Android/iPhone devices, recall, pickup and private feedback against your deployed project. Browser table requests with the anon key should fail for tickets/secrets/subscriptions and the PIN hash.
+
+Local validation completed: production build; Deno type check; browser handoff/rating/logout flows against controlled API responses at desktop, tablet and phone widths; real Deno handler tests against a controlled database transport, including Google JWT signature verification; isolated PostgreSQL migration/RLS checks and ten concurrent number allocations; service worker notification/click checks. External push delivery and wallet provider acceptance still require configured credentials and physical-device validation.

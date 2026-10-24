@@ -15,7 +15,6 @@ import {
   Check,
   CheckCheck,
   Coffee,
-  Copy,
   Globe2,
   Plus,
   Settings2,
@@ -38,13 +37,19 @@ type Business = {
   id: string;
   slug: string;
   name: string;
+  currency: string;
   name_ar: string | null;
   logo_url: string | null;
   primary_color: string | null;
   accent_color: string | null;
   google_review_url: string | null;
 };
+type Item = { name: string; qty: number; price?: number };
 type Ticket = {
+  items: Item[];
+  amount: number | null;
+  eta_at: string | null;
+  eta_updated_at: string | null;
   id: string;
   business_id: string;
   number: number;
@@ -56,6 +61,85 @@ type Ticket = {
   rating: number | null;
   feedback: string | null;
 };
+async function api(action: string, values: Record<string, unknown> = {}) {
+  if (!db)
+    throw new Error("Configure the Supabase URL and anon key to connect.");
+  const res = await fetch(
+    `${config.VITE_SUPABASE_URL}/functions/v1/pager-api`,
+    {
+      method: "POST",
+      headers: {
+        apikey: config.VITE_SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${config.VITE_SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ action, ...values }),
+    },
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Request failed");
+  return data;
+}
+const num = (n: number) => String(n).padStart(3, "0");
+const time = (v: string | null) =>
+  v
+    ? new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "—";
+const money = (n: number, currency = "USD") => {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency,
+    }).format(n);
+  } catch {
+    return `${n.toFixed(2)} ${currency}`;
+  }
+};
+function Countdown({
+  ticket,
+  ring = false,
+}: {
+  ticket: Ticket;
+  ring?: boolean;
+}) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const left = ticket.eta_at
+    ? Math.ceil((Date.parse(ticket.eta_at) - now) / 1000)
+    : 0;
+  const span = ticket.eta_at
+    ? Math.max(
+        1,
+        (Date.parse(ticket.eta_at) - Date.parse(ticket.created_at)) / 1000,
+      )
+    : 1;
+  return (
+    <div
+      className={`${ring ? "countdown-ring" : "countdown"} ${left < 0 ? "overdue" : ""}`}
+      style={
+        ring
+          ? {
+              background: `conic-gradient(var(--primary) ${Math.max(0, Math.min(100, (left / span) * 100))}%, #e9edf8 0)`,
+            }
+          : undefined
+      }
+    >
+      <div>
+        <strong>
+          {ticket.status === "ready"
+            ? "Ready!"
+            : ticket.status === "done"
+              ? "Enjoy!"
+              : `${left < 0 ? "+" : ""}${Math.floor(Math.abs(left) / 60)}:${String(Math.abs(left) % 60).padStart(2, "0")}`}
+        </strong>
+        <small>{left < 0 ? "Taking a little longer" : "until pickup"}</small>
+      </div>
+    </div>
+  );
+}
 const Locale = createContext({
   lang: "en",
   t: (k: Key): string => en[k],
@@ -142,6 +226,10 @@ function Landing() {
               {t("try")}
               <ArrowUpRight size={21} />
             </Link>
+            <p className="demo-flow">
+              Demo PIN: <strong>1234</strong>. Add an order, scan its QR on your
+              phone, then tap Ready at the counter.
+            </p>
             <div className="hero-foot">
               <Bell size={16} />
               {t("tagline")}
@@ -299,26 +387,20 @@ function Branding({
       return;
     }
     setBusy(true);
-    const { data, error } = await db!
-      .from("pager_businesses")
-      .update({
-        name: form.name.trim(),
-        name_ar: form.name_ar,
-        logo_url: form.logo_url,
-        primary_color: form.primary_color,
-        accent_color: form.accent_color,
-        google_review_url: form.google_review_url,
-      })
-      .eq("id", business.id)
-      .select()
-      .single();
-    setBusy(false);
-    if (error) setError(t("error"));
-    else {
+    try {
+      const { business: data } = await api("branding", {
+        ...form,
+        token: sessionStorage.getItem(`pager-${business.slug}`),
+      });
       onSave(data);
       close();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   }
+
   return (
     <Modal title={t("settings")} close={close}>
       <p className="muted">{t("brandingDesc")}</p>
@@ -342,6 +424,17 @@ function Branding({
             />
           </label>
         ))}
+        <label>
+          Currency
+          <input
+            value={form.currency || "USD"}
+            maxLength={3}
+            pattern="[A-Z]{3}"
+            onChange={(e) =>
+              setForm({ ...form, currency: e.target.value.toUpperCase() })
+            }
+          />
+        </label>
         <div className="color-fields">
           {(
             [
@@ -378,155 +471,131 @@ function Branding({
 }
 function Staff() {
   const { slug } = useParams();
-  const { t, lang } = useI18n();
+  const { t } = useI18n();
   const [business, setBusiness] = useState<Business | null>(null);
-  const [tickets, setTickets] = useState<Ticket[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [token, setToken] = useState(
+    () => sessionStorage.getItem(`pager-${slug}`) || "",
+  );
+  const [pin, setPin] = useState("");
   const [error, setError] = useState("");
-  const [connected, setConnected] = useState(false);
-  const [modal, setModal] = useState<"new" | "branding" | null>(null);
-  const [created, setCreated] = useState<Ticket | null>(null);
-  const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
-  const [pending, setPending] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [, tick] = useState(0);
-  useEffect(() => {
-    if (!db) {
-      setError(t("missingConfig"));
-      setLoading(false);
-      return;
-    }
-    let active = true;
-    let cleanup = () => {};
-    async function init() {
-      const { data, error } = await db!
-        .from("pager_businesses")
-        .select("*")
-        .eq("slug", slug)
-        .maybeSingle();
-      if (!active) return;
-      if (error || !data) {
-        setError(t(error ? "error" : "notFound"));
-        setLoading(false);
-        return;
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [stats, setStats] = useState<Record<string, number | null>>({});
+  const [items, setItems] = useState<Item[]>([]);
+  const [note, setNote] = useState("");
+  const [eta, setEta] = useState(10);
+  const [custom, setCustom] = useState("");
+  const [price, setPrice] = useState("");
+  const [amount, setAmount] = useState("");
+  const [created, setCreated] = useState<Ticket | null>(null);
+  const [branding, setBranding] = useState(false);
+  const [edit, setEdit] = useState<Ticket | null>(null);
+  const [editEta, setEditEta] = useState(10);
+  const [connected, setConnected] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const run = async (action: string, values: Record<string, unknown> = {}) =>
+    api(action, { ...values, token });
+  async function refresh() {
+    try {
+      const data = await run("list");
+      setTickets(data.tickets);
+      setStats(data.stats);
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+      if (/sign in|expired/.test((e as Error).message)) {
+        sessionStorage.removeItem(`pager-${slug}`);
+        setToken("");
       }
-      setBusiness(data);
-      const refresh = async () => {
-        const { data: rows, error } = await db!
-          .from("pager_tickets")
-          .select("*")
-          .eq("business_id", data.id)
-          .order("created_at", { ascending: false });
-        if (active) {
-          if (error) setError(t("error"));
-          else {
-            setTickets(rows || []);
-            setError("");
-          }
-          setLoading(false);
-        }
-      };
-      const channel = db!
-        .channel(`staff-${data.id}`)
-        .on(
-          "postgres_changes",
-          {
-            event: "*",
-            schema: "public",
-            table: "pager_tickets",
-            filter: `business_id=eq.${data.id}`,
-          },
-          refresh,
-        )
-        .subscribe((status) => {
-          if (active) setConnected(status === "SUBSCRIBED");
-        });
-      const timer = setInterval(refresh, 10000);
-      cleanup = () => {
-        clearInterval(timer);
-        void db!.removeChannel(channel);
-      };
-      await refresh();
+    } finally {
+      setLoading(false);
     }
-    void init();
-    const timer = setInterval(() => tick((n) => n + 1), 30000);
+  }
+  useEffect(() => {
+    let active = true;
+    setBusiness(null);
+    api("business", { slug })
+      .then((d) => {
+        if (active) setBusiness(d.business);
+      })
+      .catch((e) => {
+        if (active) setError(e.message);
+      });
     return () => {
       active = false;
-      clearInterval(timer);
-      cleanup();
     };
   }, [slug]);
-  async function create(e: React.FormEvent) {
-    e.preventDefault();
-    if (!business || busy) return;
+  useEffect(() => {
+    if (!token || !business) return;
+    void refresh();
+    const timer = setInterval(refresh, 5000);
+    const ch = db
+      ?.channel(`biz-${business.id}`)
+      .on("broadcast", { event: "update" }, () => void refresh())
+      .subscribe((status) => setConnected(status === "SUBSCRIBED"));
+    return () => {
+      clearInterval(timer);
+      if (ch) void db?.removeChannel(ch);
+    };
+  }, [token, business?.id]);
+  async function login(e?: React.FormEvent) {
+    e?.preventDefault();
     setBusy(true);
     setError("");
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    const { data: highest, error: readError } = await db!
-      .from("pager_tickets")
-      .select("number")
-      .eq("business_id", business.id)
-      .gte("created_at", start.toISOString())
-      .order("number", { ascending: false })
-      .limit(1);
-    if (readError) {
-      setError(t("error"));
+    try {
+      const d = await api("staff_login", { slug, pin });
+      sessionStorage.setItem(`pager-${slug}`, d.token);
+      setToken(d.token);
+      setPin("");
+    } catch (e) {
+      setError((e as Error).message);
+      setPin("");
+    } finally {
       setBusy(false);
-      return;
     }
-    const { data, error } = await db!
-      .from("pager_tickets")
-      .insert({
-        business_id: business.id,
-        number: (highest?.[0]?.number || 0) + 1,
-        note: note.trim() || null,
-        status: "waiting",
-      })
-      .select()
-      .single();
-    setBusy(false);
-    if (error) setError(t("error"));
-    else {
-      setTickets((prev) => [data, ...prev.filter((x) => x.id !== data.id)]);
-      setCreated(data);
-      setModal(null);
+  }
+  function add(name: string, price?: number) {
+    setItems((prev) => {
+      const old = prev.find((i) => i.name === name && i.price === price);
+      return old
+        ? prev.map((i) => (i === old ? { ...i, qty: i.qty + 1 } : i))
+        : [...prev, { name, price, qty: 1 }];
+    });
+  }
+  async function create(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const d = await run("create", {
+        items,
+        note,
+        eta_minutes: eta,
+        ...(amount !== "" ? { amount: Number(amount) } : {}),
+      });
+      setCreated(d.ticket);
+      setItems([]);
       setNote("");
-      setCopied(false);
+      setAmount("");
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   }
-  async function update(ticket: Ticket, status: Ticket["status"]) {
-    setPending(ticket.id);
-    const values: Record<string, string> = { status };
-    if (status === "ready") values.called_at = new Date().toISOString();
-    if (status === "done") values.completed_at = new Date().toISOString();
-    const { data, error } = await db!
-      .from("pager_tickets")
-      .update(values)
-      .eq("id", ticket.id)
-      .select()
-      .single();
-    setPending(null);
-    if (error) setError(t("error"));
-    else setTickets((prev) => prev.map((x) => (x.id === data.id ? data : x)));
+  async function change(action: string, values: Record<string, unknown>) {
+    setBusy(true);
+    try {
+      await run(action, values);
+      await refresh();
+      setEdit(null);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
-  const today = new Date().toDateString();
-  const todays = tickets.filter(
-    (x) => new Date(x.created_at).toDateString() === today,
-  );
-  const complete = tickets.filter(
-    (x) =>
-      x.status === "done" &&
-      x.completed_at &&
-      new Date(x.completed_at).toDateString() === today,
-  );
-  const waits = todays
-    .filter((x) => x.called_at)
-    .map((x) =>
-      Math.max(0, (+new Date(x.called_at!) - +new Date(x.created_at)) / 60000),
-    );
-  const ratings = complete.filter((x) => x.rating);
+  const total = items.reduce((sum, i) => sum + i.qty * (i.price || 0), 0);
   const url = created ? `${location.origin}/t/${created.id}` : "";
   return (
     <div
@@ -538,280 +607,537 @@ function Staff() {
       }
     >
       <Header business={business} staff />
-      <main className="staff-main">
-        <div className="dashboard-heading">
-          <div>
-            <div className="live-label">
-              <span className={connected ? "connected" : ""} />
-              {t(connected ? "live" : "connecting")}
-              <span className="date">
-                {new Intl.DateTimeFormat(lang, {
-                  month: "short",
-                  day: "numeric",
-                }).format(new Date())}
-              </span>
-            </div>
-            <h1>{t("queue")}</h1>
-            <p>{t("queueDesc")}</p>
-          </div>
-          <div className="toolbar">
-            <button
-              className="button subtle"
-              disabled={!business}
-              onClick={() => setModal("branding")}
-            >
-              <Settings2 size={18} />
-              {t("settings")}
-            </button>
-            <button
-              className="button primary"
-              disabled={!business}
-              onClick={() => setModal("new")}
-            >
-              <Plus size={21} />
-              {t("newTicket")}
-            </button>
-          </div>
-        </div>
-        {error && <ErrorBox message={error} />}
-        <section className="stats">
-          {[
-            [t("completed"), complete.length, CheckCheck],
-            [
-              t("avgWait"),
-              `${waits.length ? (waits.reduce((a, b) => a + b, 0) / waits.length).toFixed(1) : "—"} ${t("minutes")}`,
-              Clock,
-            ],
-            [
-              t("peakWait"),
-              `${waits.length ? Math.max(...waits).toFixed(1) : "—"} ${t("minutes")}`,
-              Volume2,
-            ],
-            [
-              t("avgRating"),
-              ratings.length
-                ? (
-                    ratings.reduce((a, b) => a + b.rating!, 0) / ratings.length
-                  ).toFixed(1)
-                : "—",
-              Star,
-            ],
-          ].map(([label, value, Icon]) => {
-            const I = Icon as typeof Star;
-            return (
-              <div className="stat" key={String(label)}>
-                <div>
-                  <span>{String(label)}</span>
-                  <strong>{String(value)}</strong>
-                </div>
-                <I size={23} />
+      {!token ? (
+        <main className="pin-page">
+          <div className="pin-card">
+            <span className="customer-coffee">
+              <Coffee />
+            </span>
+            <h1>Ready for service?</h1>
+            <p>Enter your staff PIN to open the counter.</p>
+            {slug === "demo-cafe" && (
+              <p className="demo-hint">Demo PIN: 1234</p>
+            )}
+            <form onSubmit={login}>
+              <input
+                aria-label="Staff PIN"
+                type="password"
+                inputMode="numeric"
+                autoComplete="off"
+                value={pin}
+                maxLength={12}
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
+              />
+              <div className="keypad">
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, "Clear", 0, "⌫"].map((k) => (
+                  <button
+                    type="button"
+                    key={k}
+                    onClick={() =>
+                      setPin((p) =>
+                        k === "Clear"
+                          ? ""
+                          : k === "⌫"
+                            ? p.slice(0, -1)
+                            : (p + String(k)).slice(0, 12),
+                      )
+                    }
+                  >
+                    {k}
+                  </button>
+                ))}
               </div>
-            );
-          })}
-        </section>
-        {loading ? (
-          <div className="loading">{t("loading")}</div>
-        ) : (
-          <section className="queue-board">
-            {(["waiting", "ready", "done"] as const).map((status) => {
-              const rows =
-                status === "done"
-                  ? complete
-                  : tickets.filter((x) => x.status === status);
-              return (
-                <section className={`queue-column ${status}`} key={status}>
-                  <div className="column-heading">
-                    <h2>
-                      <span className="column-dot" />
-                      {t(status)}
-                      <span className="count">{rows.length}</span>
-                    </h2>
-                    {status === "done" ? (
-                      <CircleCheck size={19} />
-                    ) : status === "ready" ? (
-                      <Bell size={19} />
-                    ) : (
-                      <Clock size={19} />
-                    )}
-                  </div>
-                  <div className="column-body">
-                    {!rows.length && (
-                      <div className="empty">
-                        <span>
-                          {status === "waiting" ? (
-                            <TicketIcon />
-                          ) : status === "ready" ? (
-                            <Coffee />
-                          ) : (
-                            <CheckCheck />
-                          )}
-                        </span>
-                        <strong>
-                          {t(
-                            status === "waiting"
-                              ? "waitingEmpty"
-                              : status === "ready"
-                                ? "readyEmpty"
-                                : "doneEmpty",
-                          )}
-                        </strong>
-                        <p>
-                          {t(
-                            status === "waiting"
-                              ? "waitingHint"
-                              : status === "ready"
-                                ? "readyHint"
-                                : "doneHint",
-                          )}
-                        </p>
-                      </div>
-                    )}
-                    {rows.map((ticket) => (
-                      <article className="queue-ticket" key={ticket.id}>
-                        <div className="card-top">
-                          <strong>
-                            <span>#</span>
-                            {String(ticket.number).padStart(3, "0")}
-                          </strong>
-                          <span>
-                            {Math.floor(
-                              (Date.now() - +new Date(ticket.created_at)) /
-                                60000,
-                            ) || t("justNow")}
-                            {Math.floor(
-                              (Date.now() - +new Date(ticket.created_at)) /
-                                60000,
-                            ) > 0
-                              ? ` ${t("timeAgo")}`
-                              : ""}
-                          </span>
-                        </div>
-                        {ticket.note && (
-                          <p className="order-note">{ticket.note}</p>
-                        )}
-                        {status === "done" ? (
-                          <div className="completed-line">
-                            <CheckCheck size={16} />
-                            {t("pickup")}
-                            {ticket.rating && <span>★ {ticket.rating}</span>}
-                          </div>
-                        ) : (
-                          <>
-                            <div className="card-actions">
-                              <button
-                                className={`button ${status === "waiting" ? "primary" : "subtle"}`}
-                                disabled={pending === ticket.id}
-                                onClick={() => update(ticket, "ready")}
-                              >
-                                <Bell size={16} />
-                                {t(status === "waiting" ? "call" : "recall")}
-                              </button>
-                              {status === "ready" && (
-                                <button
-                                  className="button primary"
-                                  disabled={pending === ticket.id}
-                                  onClick={() => update(ticket, "done")}
-                                >
-                                  <Check size={16} />
-                                  {t("pickup")}
-                                </button>
-                              )}
-                            </div>
-                            <div className="card-bottom">
-                              <button
-                                onClick={() => {
-                                  setCreated(ticket);
-                                  setCopied(false);
-                                }}
-                              >
-                                {t("openTicket")}
-                                <ArrowUpRight size={13} />
-                              </button>
-                              <button
-                                disabled={pending === ticket.id}
-                                onClick={() => update(ticket, "cancelled")}
-                              >
-                                {t("cancel")}
-                              </button>
-                            </div>
-                          </>
-                        )}
-                      </article>
+              <button
+                className="button primary full large"
+                disabled={busy || pin.length < 4 || !business}
+              >
+                {busy ? "Signing in…" : "Open counter"}
+              </button>
+            </form>
+            {error && (
+              <p className="error" role="alert">
+                {error}
+              </p>
+            )}
+          </div>
+        </main>
+      ) : (
+        <main className="pos-main">
+          <div className="dashboard-heading">
+            <div>
+              <div className="live-label">
+                <span className={connected ? "connected" : ""} />
+                {connected ? "Live service" : "Refreshing every 5 seconds"}
+              </div>
+              <h1>The counter</h1>
+              <p>Good orders. Smooth handoffs.</p>
+            </div>
+            <div className="toolbar">
+              <button
+                className="button subtle"
+                onClick={() => setBranding(true)}
+              >
+                <Settings2 size={18} />
+                {t("settings")}
+              </button>
+              <button
+                className="button subtle"
+                onClick={() => {
+                  sessionStorage.removeItem(`pager-${slug}`);
+                  setToken("");
+                  setTickets([]);
+                }}
+              >
+                Log out
+              </button>
+            </div>
+          </div>
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
+          <section className="stats pos-stats">
+            {[
+              ["Completed", stats.completed ?? 0],
+              [
+                "Avg wait",
+                stats.avg_wait == null
+                  ? "—"
+                  : `${stats.avg_wait.toFixed(1)} min`,
+              ],
+              [
+                "Longest wait",
+                stats.longest_wait == null
+                  ? "—"
+                  : `${stats.longest_wait.toFixed(0)} min`,
+              ],
+              ["Avg rating", stats.avg_rating?.toFixed(1) ?? "—"],
+              [
+                "On time",
+                stats.on_time == null ? "—" : `${stats.on_time.toFixed(0)}%`,
+              ],
+            ].map(([label, value]) => (
+              <div className="stat" key={label}>
+                <div>
+                  <span>{label}</span>
+                  <strong>{value}</strong>
+                </div>
+              </div>
+            ))}
+          </section>
+          <div className="pos-layout">
+            <section className="order-entry">
+              <div className="entry-heading">
+                <h2>New order</h2>
+                <Coffee size={23} />
+              </div>
+              <form className="form" onSubmit={create}>
+                {slug === "demo-cafe" && (
+                  <div className="menu-tiles">
+                    {[
+                      ["Latte", 4],
+                      ["Cappuccino", 4],
+                      ["Iced Spanish Latte", 5.5],
+                      ["Croissant", 3.5],
+                      ["Cheesecake", 6],
+                      ["Water", 1.5],
+                    ].map(([name, p]) => (
+                      <button
+                        type="button"
+                        key={name}
+                        onClick={() => add(String(name), Number(p))}
+                      >
+                        <span>{name}</span>
+                        <small>{money(Number(p), business?.currency)}</small>
+                        <Plus size={16} />
+                      </button>
                     ))}
                   </div>
-                </section>
-              );
-            })}
-          </section>
-        )}
-      </main>
-      <Footer />
-      {modal === "branding" && business && (
+                )}
+                <div className="custom-item">
+                  <input
+                    aria-label="Custom item"
+                    placeholder="Custom item"
+                    value={custom}
+                    onChange={(e) => setCustom(e.target.value)}
+                  />
+                  <input
+                    aria-label="Item price"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Price"
+                    value={price}
+                    onChange={(e) => setPrice(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="button subtle"
+                    disabled={!custom.trim()}
+                    onClick={() => {
+                      add(custom.trim(), price ? Number(price) : undefined);
+                      setCustom("");
+                      setPrice("");
+                    }}
+                    aria-label="Add custom item"
+                  >
+                    <Plus size={18} />
+                  </button>
+                </div>
+                <div className="basket">
+                  {!items.length && (
+                    <p className="muted">Tap an item to build the order.</p>
+                  )}
+                  {items.map((i, index) => (
+                    <div className="basket-row" key={index}>
+                      <div>
+                        <strong>{i.name}</strong>
+                        <small>{money(i.price || 0, business?.currency)}</small>
+                      </div>
+                      <div className="stepper">
+                        <button
+                          type="button"
+                          aria-label={`Remove one ${i.name}`}
+                          onClick={() =>
+                            setItems((p) =>
+                              p
+                                .map((x, n) =>
+                                  n === index ? { ...x, qty: x.qty - 1 } : x,
+                                )
+                                .filter((x) => x.qty > 0),
+                            )
+                          }
+                        >
+                          −
+                        </button>
+                        <span>{i.qty}</span>
+                        <button
+                          type="button"
+                          aria-label={`Add one ${i.name}`}
+                          onClick={() =>
+                            setItems((p) =>
+                              p.map((x, n) =>
+                                n === index ? { ...x, qty: x.qty + 1 } : x,
+                              ),
+                            )
+                          }
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="order-total">
+                  <span>Total</span>
+                  <strong>
+                    {money(
+                      amount !== "" ? Number(amount) : total,
+                      business?.currency,
+                    )}
+                  </strong>
+                </div>
+                <label>
+                  Custom total (optional)
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="Use item total"
+                  />
+                </label>
+                <label>
+                  Order note
+                  <textarea
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="Oat milk, takeaway…"
+                    rows={2}
+                  />
+                </label>
+                <label>Ready in</label>
+                <div className="eta-chips">
+                  {[5, 10, 15, 20].map((m) => (
+                    <button
+                      className={eta === m ? "selected" : ""}
+                      type="button"
+                      key={m}
+                      onClick={() => setEta(m)}
+                    >
+                      {m} min
+                    </button>
+                  ))}
+                </div>
+                <label>
+                  Custom minutes
+                  <input
+                    type="number"
+                    min="1"
+                    max="1440"
+                    value={eta}
+                    onChange={(e) => setEta(Number(e.target.value))}
+                  />
+                </label>
+                <button
+                  className="button primary large full"
+                  disabled={busy || (!items.length && !amount) || eta < 1}
+                >
+                  <Plus size={20} />
+                  {busy ? "Working…" : "Create order"}
+                </button>
+              </form>
+            </section>
+            <section className="live-queue">
+              <div className="entry-heading">
+                <h2>Live queue</h2>
+                <span className="muted">Today</span>
+              </div>
+              {loading ? (
+                <p className="loading">Loading orders…</p>
+              ) : (
+                <div className="queue-board">
+                  {(["waiting", "ready", "done"] as const).map((status) => (
+                    <section className={`queue-column ${status}`} key={status}>
+                      <div className="column-heading">
+                        <h2>
+                          <span className="column-dot" />
+                          {status === "waiting"
+                            ? "Preparing"
+                            : status === "ready"
+                              ? "Ready"
+                              : "Done"}
+                          <span className="count">
+                            {tickets.filter((x) => x.status === status).length}
+                          </span>
+                        </h2>
+                      </div>
+                      <div className="column-body">
+                        {!tickets.some((x) => x.status === status) && (
+                          <div className="empty">
+                            <Coffee />
+                            <p>
+                              {status === "waiting"
+                                ? "Ready for the next order."
+                                : status === "ready"
+                                  ? "All caught up."
+                                  : "Picked-up orders appear here."}
+                            </p>
+                          </div>
+                        )}
+                        {tickets
+                          .filter((x) => x.status === status)
+                          .map((ticket) => (
+                            <article className="pos-ticket" key={ticket.id}>
+                              <div className="pos-ticket-top">
+                                <strong>#{num(ticket.number)}</strong>
+                                {status === "waiting" ? (
+                                  <Countdown ticket={ticket} />
+                                ) : (
+                                  <span>
+                                    {time(
+                                      status === "ready"
+                                        ? ticket.called_at
+                                        : ticket.completed_at,
+                                    )}
+                                  </span>
+                                )}
+                              </div>
+                              <p>
+                                {ticket.items
+                                  ?.map((i) => `${i.qty} × ${i.name}`)
+                                  .join(", ") || "Custom order"}
+                              </p>
+                              {ticket.note && (
+                                <p className="ticket-note">{ticket.note}</p>
+                              )}
+                              {status !== "done" && (
+                                <>
+                                  <div className="ticket-actions">
+                                    {status === "waiting" ? (
+                                      <>
+                                        <button
+                                          disabled={busy}
+                                          className="button subtle"
+                                          onClick={() =>
+                                            change("update_eta", {
+                                              ticket_id: ticket.id,
+                                              eta_minutes:
+                                                Math.max(
+                                                  0,
+                                                  Math.ceil(
+                                                    (Date.parse(
+                                                      ticket.eta_at || "",
+                                                    ) -
+                                                      Date.now()) /
+                                                      60000,
+                                                  ) || 0,
+                                                ) + 5,
+                                            })
+                                          }
+                                        >
+                                          +5 min
+                                        </button>
+                                        <button
+                                          disabled={busy}
+                                          className="button subtle"
+                                          onClick={() => {
+                                            setEdit(ticket);
+                                            setEditEta(10);
+                                          }}
+                                        >
+                                          Edit ETA
+                                        </button>
+                                        <button
+                                          disabled={busy}
+                                          className="button primary full"
+                                          onClick={() =>
+                                            change("set_status", {
+                                              ticket_id: ticket.id,
+                                              status: "ready",
+                                            })
+                                          }
+                                        >
+                                          Ready / Call
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <button
+                                          disabled={busy}
+                                          className="button subtle"
+                                          onClick={() =>
+                                            change("set_status", {
+                                              ticket_id: ticket.id,
+                                              status: "recall",
+                                            })
+                                          }
+                                        >
+                                          Re-call
+                                        </button>
+                                        <button
+                                          disabled={busy}
+                                          className="button primary"
+                                          onClick={() =>
+                                            change("set_status", {
+                                              ticket_id: ticket.id,
+                                              status: "done",
+                                            })
+                                          }
+                                        >
+                                          Picked up
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                  <div className="ticket-actions">
+                                    <button
+                                      disabled={busy}
+                                      className="text-button"
+                                      onClick={() =>
+                                        change("set_status", {
+                                          ticket_id: ticket.id,
+                                          status: "cancelled",
+                                        })
+                                      }
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      disabled={busy}
+                                      className="text-button"
+                                      onClick={() =>
+                                        change("push_test", {
+                                          ticket_id: ticket.id,
+                                        })
+                                      }
+                                    >
+                                      Test alert
+                                    </button>
+                                  </div>
+                                </>
+                              )}
+                            </article>
+                          ))}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
+        </main>
+      )}
+      {branding && business && (
         <Branding
           business={business}
           onSave={setBusiness}
-          close={() => setModal(null)}
+          close={() => setBranding(false)}
         />
-      )}{" "}
-      {modal === "new" && (
-        <Modal title={t("newTicket")} close={() => setModal(null)}>
-          <form onSubmit={create} className="form">
+      )}
+      {edit && (
+        <Modal
+          title={`Update ETA · #${num(edit.number)}`}
+          close={() => setEdit(null)}
+        >
+          <form
+            className="form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void change("update_eta", {
+                ticket_id: edit.id,
+                eta_minutes: editEta,
+              });
+            }}
+          >
             <label>
-              {t("note")} <span className="muted">({t("optional")})</span>
-              <textarea
-                autoFocus
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder={t("notePlaceholder")}
-                rows={3}
+              Minutes from now
+              <input
+                type="number"
+                min="1"
+                max="1440"
+                value={editEta}
+                onChange={(e) => setEditEta(Number(e.target.value))}
               />
             </label>
-            <button className="button primary large" disabled={busy}>
-              <Plus size={20} />
-              {t(busy ? "creating" : "create")}
+            <button disabled={busy} className="button primary">
+              Update pickup time
             </button>
           </form>
         </Modal>
       )}
       {created && (
-        <Modal title={t("scan")} close={() => setCreated(null)}>
-          <p className="muted">{t("scanDesc")}</p>
+        <Modal
+          title={`Order #${num(created.number)}`}
+          close={() => setCreated(null)}
+        >
+          <p className="muted">Scan to track your order</p>
           <div className="qr-panel">
-            <span>
-              {t("ticket")} #{String(created.number).padStart(3, "0")}
-            </span>
-            <QRCodeSVG value={url} size={240} marginSize={2} level="M" />
+            <QRCodeSVG value={url} size={260} marginSize={3} />
           </div>
           <a
             className="button primary full"
-            href={url}
             target="_blank"
             rel="noreferrer"
+            href={url}
           >
-            {t("openTicket")}
-            <ArrowUpRight size={18} />
+            Open customer ticket <ArrowUpRight size={18} />
           </a>
-          <button
-            className="button subtle full"
-            onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(url);
-                setCopied(true);
-              } catch {
-                setError(t("error"));
-              }
-            }}
-          >
-            <Copy size={17} />
-            {t(copied ? "copied" : "copy")}
-          </button>
           <input
             className="share-url"
+            aria-label="Customer ticket link"
             readOnly
             value={url}
-            aria-label={t("openTicket")}
             onFocus={(e) => e.target.select()}
           />
+          <button
+            className="button subtle full"
+            onClick={() => setCreated(null)}
+          >
+            Next order
+          </button>
         </Modal>
       )}
     </div>
@@ -827,6 +1153,53 @@ function Customer() {
   const [enabled, setEnabled] = useState(false);
   const [ringing, setRinging] = useState(false);
   const [partial, setPartial] = useState(false);
+  const [vapid, setVapid] = useState<string | null>(null);
+  const [wallets, setWallets] = useState<{ label: string; url: string }[]>([]);
+  const [install, setInstall] = useState<
+    (Event & { prompt: () => Promise<void> }) | null
+  >(null);
+  const ios =
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const standalone =
+    matchMedia("(display-mode: standalone)").matches ||
+    (navigator as Navigator & { standalone?: boolean }).standalone;
+  useEffect(() => {
+    const handler = (e: Event) => {
+      e.preventDefault();
+      setInstall(e as Event & { prompt: () => Promise<void> });
+    };
+    window.addEventListener("beforeinstallprompt", handler);
+    return () => window.removeEventListener("beforeinstallprompt", handler);
+  }, []);
+  useEffect(() => {
+    let active = true;
+    setWallets([]);
+    Promise.allSettled(
+      ["google_wallet", "apple_wallet"].map(async (action) => {
+        const d = await api(action, { ticket_id: ticketId });
+        return d.available && d.url
+          ? {
+              label:
+                action === "google_wallet"
+                  ? "Add to Google Wallet"
+                  : "Add to Apple Wallet",
+              url: d.url,
+            }
+          : null;
+      }),
+    ).then((rows) => {
+      if (active)
+        setWallets(
+          rows.flatMap((r) =>
+            r.status === "fulfilled" && r.value ? [r.value] : [],
+          ),
+        );
+    });
+    return () => {
+      active = false;
+    };
+  }, [ticketId]);
   const [rating, setRating] = useState(0);
   const [feedback, setFeedback] = useState("");
   const [saved, setSaved] = useState(false);
@@ -877,37 +1250,21 @@ function Customer() {
       beep();
       navigator.vibrate?.([400, 200, 400]);
     }, 3500);
-    if ("Notification" in window && Notification.permission === "granted") {
-      const options = {
-        body: `${strings.current("notificationBody")} #${current.number}`,
-        icon: "/icon.svg",
-        tag: `ticket-${current.id}`,
-        renotify: true,
-        data: { url: `/t/${current.id}` },
-      };
-      try {
-        const registration = await navigator.serviceWorker?.getRegistration();
-        if (registration)
-          await registration.showNotification(
-            strings.current("notificationTitle"),
-            options,
-          );
-        else new Notification(strings.current("notificationTitle"), options);
-      } catch {
-        setPartial(true);
-      }
-    }
   }
+
   async function acquireWake() {
     try {
-      if ("wakeLock" in navigator)
-        wake.current = await navigator.wakeLock.request("screen");
-      else setPartial(true);
+      if ("wakeLock" in navigator) {
+        if (!wake.current || wake.current.released)
+          wake.current = await navigator.wakeLock.request("screen");
+      } else setPartial(true);
     } catch {
       setPartial(true);
     }
   }
   async function enable() {
+    const permissionRequest =
+      "Notification" in window ? Notification.requestPermission() : null;
     try {
       const AudioCtor =
         window.AudioContext ||
@@ -919,16 +1276,39 @@ function Customer() {
         beep();
       } else setPartial(true);
       enabledRef.current = true;
-      setEnabled(true);
-      if ("Notification" in window) {
-        const permission = await Notification.requestPermission();
-        if (permission !== "granted") setPartial(true);
-      } else setPartial(true);
+
       await acquireWake();
+      if ("Notification" in window) {
+        const permission = await permissionRequest;
+        if (permission !== "granted")
+          throw new Error(
+            "Allow notifications in your browser settings, then try again.",
+          );
+        if (!vapid || !("PushManager" in window))
+          throw new Error(
+            "Lock-screen alerts are not available yet. Keep this page open for updates.",
+          );
+        await navigator.serviceWorker.register("/sw.js");
+        const reg = await navigator.serviceWorker.ready;
+        const raw = atob(vapid.replace(/-/g, "+").replace(/_/g, "/"));
+        const key = Uint8Array.from(raw, (c) => c.charCodeAt(0));
+        const subscription =
+          (await reg.pushManager.getSubscription()) ||
+          (await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: key,
+          }));
+        await api("subscribe", {
+          ticket_id: ticketId,
+          subscription: subscription.toJSON(),
+        });
+        setEnabled(true);
+      } else setPartial(true);
       if (latest.current?.status === "ready")
         void alertCustomer(latest.current);
-    } catch {
+    } catch (e) {
       setPartial(true);
+      setError((e as Error).message);
     }
   }
   useEffect(() => {
@@ -939,55 +1319,41 @@ function Customer() {
     }
     let active = true;
     const refresh = async () => {
-      const { data, error } = await db!
-        .from("pager_tickets")
-        .select("*")
-        .eq("id", ticketId)
-        .maybeSingle();
-      if (!active) return;
-      if (error || !data) {
-        setError(strings.current(error ? "error" : "notFound"));
-        setLoading(false);
-        return;
-      }
-      setError("");
-      setTicket(data);
-      latest.current = data;
-      setRating(data.rating || 0);
-      setRatingSaved(!!data.rating);
-      if (data.status === "ready") {
-        const key = `${data.id}-${data.called_at}`;
-        if (seen.current !== key) {
-          seen.current = key;
-          if (enabledRef.current) void alertCustomer(data);
+      try {
+        const {
+          ticket: data,
+          business: biz,
+          vapid_public,
+        } = await api("ticket", { ticket_id: ticketId });
+        if (!active) return;
+        setError("");
+        setTicket(data);
+        setBusiness(biz);
+        setVapid(vapid_public);
+        latest.current = data;
+        if (data.rating) {
+          setRating(data.rating);
+          setRatingSaved(true);
         }
-      } else stop();
-      const { data: biz, error: bizError } = await db!
-        .from("pager_businesses")
-        .select("*")
-        .eq("id", data.business_id)
-        .maybeSingle();
-      if (active) {
-        if (bizError || !biz) setError(strings.current("error"));
-        else setBusiness(biz);
-        setLoading(false);
+        if (data.status === "ready") {
+          const key = `${data.id}-${data.called_at}`;
+          if (seen.current !== key) {
+            seen.current = key;
+            if (enabledRef.current) void alertCustomer(data);
+          }
+        } else stop();
+      } catch (e) {
+        if (active) setError((e as Error).message);
+      } finally {
+        if (active) setLoading(false);
       }
     };
     const channel = db
-      .channel(`customer-${ticketId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "pager_tickets",
-          filter: `id=eq.${ticketId}`,
-        },
-        refresh,
-      )
+      .channel(`ticket-${ticketId}`)
+      .on("broadcast", { event: "update" }, refresh)
       .subscribe();
     void refresh();
-    const timer = setInterval(refresh, 10000);
+    const timer = setInterval(refresh, 5000);
     const visible = () => {
       if (document.visibilityState === "visible") {
         void refresh();
@@ -1009,30 +1375,35 @@ function Customer() {
     if (!ticket || busy) return;
     setBusy(true);
     setError("");
-    const { error } = await db!
-      .from("pager_tickets")
-      .update({ rating: value })
-      .eq("id", ticket.id);
-    setBusy(false);
-    if (error) setError(t("error"));
-    else {
+    try {
+      await api("rate", { ticket_id: ticket.id, rating: value });
       setRating(value);
       setRatingSaved(true);
       setSaved(false);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   }
   async function send(e: React.FormEvent) {
     e.preventDefault();
     if (!feedback.trim()) return;
     setBusy(true);
-    const { error } = await db!
-      .from("pager_tickets")
-      .update({ feedback: feedback.trim() })
-      .eq("id", ticketId);
-    setBusy(false);
-    if (error) setError(t("error"));
-    else setSaved(true);
+    try {
+      await api("rate", {
+        ticket_id: ticketId,
+        rating,
+        feedback: feedback.trim(),
+      });
+      setSaved(true);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
+
   const status = ticket?.status || "waiting";
   return (
     <div
@@ -1110,6 +1481,68 @@ function Customer() {
                   }).format(new Date(ticket.created_at))}
                 </div>
               </section>
+              {ticket.eta_at && status === "waiting" && (
+                <section className="eta-panel">
+                  <Countdown ticket={ticket} ring />
+                  <h2>Ready at ~{time(ticket.eta_at)}</h2>
+                  {ticket.eta_updated_at && (
+                    <p className="eta-update" role="status">
+                      Updated: now ready at ~{time(ticket.eta_at)}
+                    </p>
+                  )}
+                </section>
+              )}
+              <section className="order-details">
+                <h2>Your order</h2>
+                {ticket.items?.map((item, i) => (
+                  <div key={i}>
+                    <span>
+                      {item.qty} × {item.name}
+                    </span>
+                    <span>
+                      {item.price != null
+                        ? money(item.qty * item.price, business.currency)
+                        : ""}
+                    </span>
+                  </div>
+                ))}
+                {ticket.amount != null && (
+                  <div className="order-total">
+                    <strong>Total</strong>
+                    <strong>{money(ticket.amount, business.currency)}</strong>
+                  </div>
+                )}
+              </section>
+              <ol className="status-timeline">
+                {[
+                  ["Order received", ticket.created_at, true],
+                  ["Preparing", ticket.created_at, true],
+                  ["Ready for pickup", ticket.called_at, !!ticket.called_at],
+                  ["Picked up", ticket.completed_at, !!ticket.completed_at],
+                ].map(([label, stamp, complete]) => (
+                  <li
+                    className={complete ? "complete" : ""}
+                    key={String(label)}
+                  >
+                    <span>
+                      {complete ? <Check size={15} /> : <Clock size={15} />}
+                    </span>
+                    <strong>{String(label)}</strong>
+                    <time>{stamp ? time(String(stamp)) : "—"}</time>
+                  </li>
+                ))}
+              </ol>
+              {wallets.map((w) => (
+                <a
+                  className="button subtle full wallet-button"
+                  key={w.label}
+                  href={w.url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {w.label}
+                </a>
+              ))}
               {(status === "waiting" || status === "ready") && (
                 <section className="alerts">
                   {ringing ? (
@@ -1127,11 +1560,38 @@ function Customer() {
                       disabled={enabled}
                     >
                       <Bell size={20} />
-                      {t(enabled ? "enabled" : "enable")}
+                      {enabled
+                        ? "Lock-screen alerts on"
+                        : "Turn on lock-screen alerts"}
                       {enabled && <Check size={18} />}
                     </button>
                   )}
-                  <p>{t("alertHint")}</p>
+                  {ios && !standalone ? (
+                    <div className="install-guide">
+                      <strong>Install for iPhone alerts</strong>
+                      <p>
+                        On iOS 16.4 or later, tap Share → Add to Home Screen.
+                        Open your order from the Home Screen, then turn on
+                        alerts.
+                      </p>
+                    </div>
+                  ) : (
+                    <p>
+                      Get a notification when your pickup time changes or your
+                      order is ready.
+                    </p>
+                  )}
+                  {install && (
+                    <button
+                      className="button subtle full"
+                      onClick={async () => {
+                        await install.prompt();
+                        setInstall(null);
+                      }}
+                    >
+                      Install Qudra Pager
+                    </button>
+                  )}
                   {partial && <p role="status">{t("alertPartial")}</p>}
                 </section>
               )}
@@ -1222,6 +1682,14 @@ function Missing() {
     </>
   );
 }
+function StaffRoute() {
+  const { slug } = useParams();
+  return <Staff key={slug} />;
+}
+function CustomerRoute() {
+  const { ticketId } = useParams();
+  return <Customer key={ticketId} />;
+}
 function App() {
   const [lang, setLang] = useState(() => {
     try {
@@ -1251,8 +1719,8 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Landing />} />
-          <Route path="/b/:slug/staff" element={<Staff />} />
-          <Route path="/t/:ticketId" element={<Customer />} />
+          <Route path="/b/:slug/staff" element={<StaffRoute />} />
+          <Route path="/t/:ticketId" element={<CustomerRoute />} />
           <Route path="*" element={<Missing />} />
         </Routes>
       </BrowserRouter>
