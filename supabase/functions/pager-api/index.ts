@@ -157,7 +157,7 @@ async function googleWallet(
   );
   const object = {
     id: `${s.google_wallet_issuer_id}.order_${t.id.replace(/-/g, "")}`,
-    classId: `${s.google_wallet_issuer_id}.qudra_orders`,
+    classId: `${s.google_wallet_issuer_id}.pager_orders`,
     state: "ACTIVE",
     hexBackgroundColor: b.primary_color || "#193cba",
     cardTitle: { defaultValue: { language: "en", value: b.name } },
@@ -195,7 +195,7 @@ async function googleWallet(
       typ: "savetowallet",
       iat: Math.floor(Date.now() / 1000),
       payload: {
-        genericClasses: [{ id: `${s.google_wallet_issuer_id}.qudra_orders` }],
+        genericClasses: [{ id: `${s.google_wallet_issuer_id}.pager_orders` }],
         genericObjects: [object],
       },
     });

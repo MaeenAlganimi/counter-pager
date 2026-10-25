@@ -1,6 +1,6 @@
 {
-  "name": "Qudra Pager",
-  "short_name": "Qudra",
+  "name": "Counter Pager",
+  "short_name": "Counter Pager",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f7f8fc",

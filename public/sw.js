@@ -14,7 +14,7 @@ self.addEventListener("push", (event) => {
       ? data.url
       : "/";
   event.waitUntil(
-    self.registration.showNotification(data.title || "Qudra Pager", {
+    self.registration.showNotification(data.title || "Counter Pager", {
       body: data.body || "Your order has an update",
       tag: data.tag || "order-update",
       renotify: true,

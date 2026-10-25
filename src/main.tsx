@@ -1238,7 +1238,7 @@ function Customer() {
     loop.current = null;
     setRinging(false);
     navigator.vibrate?.(0);
-    document.title = "Qudra Pager";
+    document.title = "Counter Pager";
   }
   async function alertCustomer(current: Ticket) {
     setRinging(true);
@@ -1589,7 +1589,7 @@ function Customer() {
                         setInstall(null);
                       }}
                     >
-                      Install Qudra Pager
+                      Install Counter Pager
                     </button>
                   )}
                   {partial && <p role="status">{t("alertPartial")}</p>}
@@ -1694,7 +1694,7 @@ function App() {
   const [lang, setLang] = useState(() => {
     try {
       return (
-        localStorage.getItem("qudra-language") ||
+        localStorage.getItem("pager-language") ||
         (navigator.language.startsWith("ar") ? "ar" : "en")
       );
     } catch {
@@ -1705,7 +1705,7 @@ function App() {
     document.documentElement.lang = lang;
     document.documentElement.dir = lang === "ar" ? "rtl" : "ltr";
     try {
-      localStorage.setItem("qudra-language", lang);
+      localStorage.setItem("pager-language", lang);
     } catch {}
   }, [lang]);
   return (

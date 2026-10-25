@@ -1,5 +1,5 @@
 export const en = {
-  brand: "Qudra Pager",
+  brand: "Counter Pager",
   tagline: "Good things. Less waiting.",
   home: "Home",
   dashboard: "Staff dashboard",

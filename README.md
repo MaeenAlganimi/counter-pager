@@ -1,4 +1,4 @@
-# Qudra Pager
+# Counter Pager
 
 A café counter and customer pager built with Vite, React, TypeScript and Supabase. The original blue/apricot ticket design now includes item entry, pickup estimates, staff PIN sessions and server Web Push.
 
@@ -77,7 +77,7 @@ The open page also chimes, vibrates and flashes on ready/re-call after the user 
 
 Buttons stay hidden while the API reports unavailable.
 
-Google Wallet: add `google_wallet_issuer_id` and `google_wallet_service_account_json` (the complete Google service account JSON) to `pager_secrets`, plus `public_app_url`. Enable Google Wallet API, authorize the service account for the issuer, and complete issuer onboarding. The JWT includes the Generic class `<issuer_id>.qudra_orders` and the order object, creating them on save. The function constructs a Generic object with order/status/ETA and QR, signs an RS256 `savetowallet` JWT with Web Crypto, and returns the save URL. See [Google's web issuance guide](https://developers.google.com/wallet/generic/web). This is a snapshot; subsequent ticket updates are visible via the QR, not automatically synchronized into Wallet.
+Google Wallet: add `google_wallet_issuer_id` and `google_wallet_service_account_json` (the complete Google service account JSON) to `pager_secrets`, plus `public_app_url`. Enable Google Wallet API, authorize the service account for the issuer, and complete issuer onboarding. The JWT includes the Generic class `<issuer_id>.pager_orders` and the order object, creating them on save. The function constructs a Generic object with order/status/ETA and QR, signs an RS256 `savetowallet` JWT with Web Crypto, and returns the save URL. See [Google's web issuance guide](https://developers.google.com/wallet/generic/web). This is a snapshot; subsequent ticket updates are visible via the QR, not automatically synchronized into Wallet.
 
 Apple Wallet: signing is scaffolded in [wallet/apple](wallet/apple/README.md). It needs a Pass Type ID, team ID, signer certificate/private key and WWDR intermediate certificate plus a trusted Node signing service. Until that service is deployed and connected, `apple_wallet` returns `available:false` and the UI hides its button.
 
