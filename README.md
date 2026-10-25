@@ -1,5 +1,7 @@
 # Counter Pager
 
+**Live demo:** https://counter-pager.onrender.com (free instance; first load can take ~50 s to wake)
+
 A café counter and customer pager built with Vite, React, TypeScript and Supabase. The original blue/apricot ticket design now includes item entry, pickup estimates, staff PIN sessions and server Web Push.
 
 ## Run and deploy
